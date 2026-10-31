@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check package version matches tag
         if: github.event_name == 'release'
@@ -30,7 +30,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
@@ -55,9 +55,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" dist/next-camera-* --clobber
 
+      # Skips versions already on npm, so a release can be re-run (e.g. to re-attach executables).
       # Prerelease versions (0.2.0-beta.1) go to their own dist-tag ("beta") instead of "latest".
       # Trusted publishing (OIDC via id-token: write): no npm token needed once it's set up on npmjs.com
       - name: Publish to NPM
         run: |
-          DIST_TAG=$(node -p "const pre = require('./package.json').version.split('-')[1]; pre ? (pre.split('.')[0] || 'next') : 'latest'")
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm, skipping"
+            exit 0
+          fi
+          DIST_TAG=$(node -p "const pre = '$VERSION'.split('-')[1]; pre ? (pre.split('.')[0] || 'next') : 'latest'")
           npm publish --provenance --tag "$DIST_TAG"

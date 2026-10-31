@@ -210,12 +210,12 @@ jobs:
   next-camera:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { ref: "${{ github.event.pull_request.base.sha }}", path: base }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { ref: "${{ github.event.pull_request.head.sha }}", path: head }
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - uses: oven-sh/setup-bun@v2
       - run: pnpm install --frozen-lockfile
@@ -224,7 +224,7 @@ jobs:
         working-directory: head
       # ubuntu-latest ships Google Chrome, which is detected automatically
       - run: bunx next-camera ./base ./head --out next-camera-output
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with: { name: next-camera, path: next-camera-output }
 ```
