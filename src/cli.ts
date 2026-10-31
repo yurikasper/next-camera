@@ -3,6 +3,7 @@ import { parseArgs } from "node:util";
 import pkg from "../package.json";
 import { parseViewport, type ColorScheme, type FileConfig, type Viewport } from "./config";
 import { UserError } from "./util";
+import { cacheDir } from "./worktree";
 
 // Read from package.json so the release workflow's tag check also covers --version and report.json
 export const VERSION: string = pkg.version;
@@ -62,6 +63,8 @@ COMMANDS
                            --with-deps also installs the system libraries it needs (Linux, may need sudo)
   clean                    Delete the cached worktrees for this repo (--all: for every repo)
 
+  Run next-camera help <command> (or <command> --help) for a command's details.
+
 OUTPUT FILES
   <out>/report.md          Human/agent readable report with images
   <out>/report.json        Machine readable report (also printed by --json)
@@ -77,6 +80,46 @@ EXIT CODES
 
 Docs: see README.md (config file, dynamic routes, CI setup, using it from coding agents)
 `;
+
+const COMMAND_HELP: Record<string, () => string> = {
+    clean: () => `next-camera clean [--all]
+
+Delete the git worktrees next-camera keeps to check out base and head, along with their
+node_modules and .next caches. They are recreated (and dependencies reinstalled) on the next run.
+
+OPTIONS
+  --all                    Clean the worktrees of every repository, not only the current one
+  -C <dir>                 Run as if started in <dir>
+
+WHERE THEY ARE
+  ${cacheDir()} (set NEXT_CAMERA_CACHE_DIR to change it).
+  When a lockfile in a parent of that folder would change how Next.js resolves the project, a
+  repository's worktrees are kept in .next-camera-wt/ beside the repository instead.
+  Worktrees in use by a running next-camera are skipped.
+`,
+    "install-browser": () => `next-camera install-browser [--with-deps]
+
+Download Chromium headless shell with Playwright's installer (runs npx playwright install, so
+Node.js must be installed). Only needed when no Chrome, Chromium or Edge is installed: next-camera
+finds those, and browsers Playwright or Puppeteer already downloaded, on its own.
+
+OPTIONS
+  --with-deps              Also install the system libraries Chromium needs (Linux, may ask for sudo)
+
+The browser goes to Playwright's cache (PLAYWRIGHT_BROWSERS_PATH if set), which next-camera checks
+first. To use a specific browser instead, pass --browser <path> or set NEXT_CAMERA_BROWSER.
+`,
+};
+
+/** General help, or the help of one command (`next-camera help clean`, `next-camera clean --help`) */
+export function helpText(topic?: string): string {
+    if (!topic) return HELP;
+    const command = COMMAND_HELP[topic];
+    if (!command) {
+        throw new UserError(`No help for "${topic}". Commands with their own help: ${Object.keys(COMMAND_HELP).join(", ")}`);
+    }
+    return command();
+}
 
 export interface Options {
     cwd: string;
@@ -161,7 +204,11 @@ export function parseCli(argv: string[]): ParsedArgs {
         throw new UserError(`${(error as Error).message}\nRun next-camera --help for usage.`);
     }
     const { values, positionals } = parsed;
-    if (values.help || positionals[0] === "help") return { command: "help", positionals, flags: values };
+    if (values.help || positionals[0] === "help") {
+        // `help <command>` and `<command> --help` show that command's help; anything else the general help
+        const topic = positionals[0] === "help" ? positionals[1] : positionals[0] in COMMAND_HELP ? positionals[0] : undefined;
+        return { command: "help", positionals: topic ? [topic] : [], flags: values };
+    }
     if (values.version) return { command: "version", positionals, flags: values };
     if (positionals[0] === "clean") return { command: "clean", positionals: positionals.slice(1), flags: values };
     if (positionals[0] === "install-browser") {

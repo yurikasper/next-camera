@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import path from "node:path";
-import { HELP, parseCli, resolveOptions, VERSION, type ParsedArgs } from "./cli";
+import { helpText, parseCli, resolveOptions, VERSION, type ParsedArgs } from "./cli";
 import { compare } from "./compare";
 import { findConfigFile, loadConfigFile, type FileConfig } from "./config";
 import { findRepoRoot } from "./git";
@@ -31,7 +31,7 @@ async function configSearchDirs(args: ParsedArgs, cwd: string): Promise<string[]
 async function main(argv: string[]): Promise<number> {
     const args = parseCli(argv);
     if (args.command === "help") {
-        process.stdout.write(HELP);
+        process.stdout.write(helpText(args.positionals[0]));
         return 0;
     }
     if (args.command === "version") {

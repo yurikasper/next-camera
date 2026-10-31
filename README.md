@@ -72,6 +72,7 @@ next-camera --json              # JSON report on stdout
 next-camera --fail-on-diff      # exit 1 if anything changed (for CI)
 next-camera clean               # delete the cached worktrees for this repo
 next-camera install-browser     # download Chromium if no Chrome/Chromium/Edge is installed
+next-camera help clean          # details on a command (same as: next-camera clean --help)
 ```
 
 Run it from the app directory, or anywhere in the repo with `--app apps/web`. Run `next-camera --help`

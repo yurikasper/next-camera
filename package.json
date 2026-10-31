@@ -1,6 +1,6 @@
 {
     "name": "next-camera",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Screenshot the pages of a Next.js app before and after a change and diff them, so humans and coding agents can spot visual regressions",
     "author": "Yuri Kasper",
     "keywords": [
