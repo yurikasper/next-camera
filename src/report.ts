@@ -86,6 +86,7 @@ export interface Report {
     ignoredFiles: string[];
     skipped: Skipped[];
     routes: RouteReport[];
+    /** Route counts. A route with one changed and one failed variant counts as both changed and failed. */
     summary: { changed: number; unchanged: number; failed: number; skipped: number; newIssues: number };
 }
 
@@ -93,7 +94,8 @@ export function summarize(report: Report): Report["summary"] {
     return {
         changed: report.routes.filter((route) => route.status === "changed").length,
         unchanged: report.routes.filter((route) => route.status === "unchanged").length,
-        failed: report.routes.filter((route) => route.status === "failed").length,
+        // Routes with any failed variant, including routes whose other variants changed
+        failed: report.routes.filter((route) => route.variants.some((variant) => variant.status === "failed")).length,
         skipped: report.skipped.length,
         newIssues: report.routes.reduce(
             (sum, route) => sum + route.variants.reduce((n, variant) => n + variant.newIssues.length, 0),
@@ -109,7 +111,9 @@ export function describeReason(reason: Reason): string {
                 ? `${reason.file} (imported via ${reason.via.slice(0, -1).join(" → ")})`
                 : `${reason.file} (the page itself)`;
         case "global":
-            return `${reason.file} (affects every page)`;
+            return reason.via && reason.via.length > 1
+                ? `${reason.file} (imported via ${reason.via.slice(0, -1).join(" → ")}, affects every page)`
+                : `${reason.file} (affects every page)`;
         case "asset":
             return `${reason.file} (referenced in ${reason.via?.[reason.via.length - 1] ?? "a page"})`;
         case "all":
@@ -164,7 +168,7 @@ export function renderMarkdown(report: Report): string {
     }
 
     const changed = report.routes.filter((route) => route.status === "changed");
-    const failed = report.routes.filter((route) => route.status === "failed");
+    const failed = report.routes.filter((route) => route.variants.some((variant) => variant.status === "failed"));
     const unchanged = report.routes.filter((route) => route.status === "unchanged");
     const withIssues = report.routes.filter((route) => route.variants.some((variant) => variant.newIssues.length));
 

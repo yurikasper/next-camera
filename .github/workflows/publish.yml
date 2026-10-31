@@ -9,7 +9,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
@@ -44,31 +44,20 @@ jobs:
       - name: Run tests
         run: bun test
 
-      # Trusted publishing (OIDC via id-token: write), no npm token needed once it's set up on npmjs.com
-      - name: Publish to NPM
-        run: npm publish --provenance
-
-  binaries:
-    if: github.event_name == 'release'
-    needs: publish
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
+      # Compile before publishing so a broken build never reaches npm
       - name: Build standalone executables
         run: bun run build:all
 
+      # Before npm: if publishing fails, the job can be re-run and this step just replaces the files
       - name: Attach executables to the release
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" dist/next-camera-* --clobber
+
+      # Prerelease versions (0.2.0-beta.1) go to their own dist-tag ("beta") instead of "latest".
+      # Trusted publishing (OIDC via id-token: write): no npm token needed once it's set up on npmjs.com
+      - name: Publish to NPM
+        run: |
+          DIST_TAG=$(node -p "const pre = require('./package.json').version.split('-')[1]; pre ? (pre.split('.')[0] || 'next') : 'latest'")
+          npm publish --provenance --tag "$DIST_TAG"

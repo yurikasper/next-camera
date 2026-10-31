@@ -1,9 +1,11 @@
 import path from "node:path";
 import { parseArgs } from "node:util";
+import pkg from "../package.json";
 import { parseViewport, type ColorScheme, type FileConfig, type Viewport } from "./config";
 import { UserError } from "./util";
 
-export const VERSION = "0.1.0";
+// Read from package.json so the release workflow's tag check also covers --version and report.json
+export const VERSION: string = pkg.version;
 
 export const HELP = `next-camera ${VERSION}
 Screenshot the pages of a Next.js app before and after a change, and diff them.

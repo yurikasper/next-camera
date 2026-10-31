@@ -30,11 +30,19 @@ export interface Side {
 export interface Sources {
     base: Side;
     head: Side;
-    /** Changed files relative to the root, forward slashes */
-    changedFiles: string[];
+    /**
+     * Changed files relative to the root (or to the app folder in mixed mode), forward slashes.
+     * null until prepareSides when they can only be computed from the prepared checkouts.
+     */
+    changedFiles: string[] | null;
     repo: string | null;
-    /** A foreign directory compared against a git checkout: roots are the app folders themselves */
+    /** A foreign directory compared against a git checkout: changed files are relative to the app folders */
     mixed: boolean;
+}
+
+// Root used for dependency analysis. In mixed mode the two sides only share the app folder layout.
+export function analysisRoot(sources: Sources, side: Side): string {
+    return sources.mixed ? side.appDir : side.root;
 }
 
 type Spec = { type: "dir"; path: string } | { type: "ref"; ref: string } | { type: "working-tree"; path?: string };
@@ -62,18 +70,28 @@ function detectAppRel(repo: string, start: string): string {
 const ALWAYS_IGNORED = new Set(["node_modules", ".git", ".next", ".turbo", ".vercel", ".swc", ".next-camera", ".cache"]);
 const ROOT_IGNORED = new Set(["out", "dist", "build", "coverage", ".output"]);
 
-function listFiles(root: string): Map<string, number> {
-    const files = new Map<string, number>();
+function listFiles(root: string): Set<string> {
+    const files = new Set<string>();
     const walk = (dir: string, depth: number) => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             if (ALWAYS_IGNORED.has(entry.name) || (depth === 0 && ROOT_IGNORED.has(entry.name))) continue;
             const full = path.join(dir, entry.name);
             if (entry.isDirectory()) walk(full, depth + 1);
-            else if (entry.isFile()) files.set(toPosix(path.relative(root, full)), fs.statSync(full).size);
+            else if (entry.isFile()) files.add(toPosix(path.relative(root, full)));
         }
     };
     walk(root, 0);
     return files;
+}
+
+function isText(buffer: Buffer): boolean {
+    return !buffer.subarray(0, 8000).includes(0);
+}
+
+// Checkouts made with different line-ending settings (git core.autocrlf) differ only in \r
+function sameText(left: Buffer, right: Buffer): boolean {
+    if (!isText(left) || !isText(right)) return false;
+    return left.toString("utf8").replace(/\r\n/g, "\n") === right.toString("utf8").replace(/\r\n/g, "\n");
 }
 
 // Changed files between two plain directories (no git needed, e.g. two CI checkouts)
@@ -82,15 +100,13 @@ export function compareDirectories(baseRoot: string, headRoot: string): string[]
     const head = listFiles(headRoot);
     const changed: string[] = [];
     for (const file of new Set([...base.keys(), ...head.keys()])) {
-        const a = base.get(file);
-        const b = head.get(file);
-        if (a === undefined || b === undefined || a !== b) {
+        if (!base.has(file) || !head.has(file)) {
             changed.push(file);
             continue;
         }
         const left = fs.readFileSync(path.join(baseRoot, file));
         const right = fs.readFileSync(path.join(headRoot, file));
-        if (!left.equals(right)) changed.push(file);
+        if (!left.equals(right) && !sameText(left, right)) changed.push(file);
     }
     return changed.sort();
 }
@@ -167,12 +183,13 @@ export async function resolveSources(options: Options): Promise<Sources> {
     );
     const [base, head] = sides;
 
-    let files: string[];
+    let files: string[] | null;
     if (options.changed) {
         files = await readChangedList(options.changed, cwd);
     } else if (mixed) {
-        // A foreign directory against a git checkout: compare the app folders directly
-        files = compareDirectories(base.appDir, head.appDir);
+        // A foreign directory against a git checkout: the app folders are compared once the
+        // checkout exists (prepareSides), since a ref's files only exist in its worktree
+        files = null;
     } else if (base.kind === "working-tree" && head.kind === "working-tree") {
         files = [];
     } else if (base.kind === "working-tree" || head.kind === "working-tree") {
@@ -230,8 +247,7 @@ export async function prepareSides(sources: Sources, options: Options, install: 
         })
     );
 
-    // Changed files were computed relative to the app folders, so analysis must use them as roots
-    if (sources.mixed) for (const side of [sources.base, sources.head]) side.root = side.appDir;
+    sources.changedFiles ??= compareDirectories(sources.base.appDir, sources.head.appDir);
 
     for (const side of [sources.base, sources.head]) validateApp(side);
     if (!install) return;

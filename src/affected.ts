@@ -80,6 +80,21 @@ const ROOT_GLOBALS = [
     "tsconfig*.json",
 ];
 
+// Code that runs for every request or page without being imported by a page. Whatever these files
+// import affects every page too. Relative to the app directory.
+const CODE = "{ts,tsx,js,jsx,mjs,cjs,mts,cts}";
+const GLOBAL_ENTRIES = [
+    `{middleware,proxy,instrumentation,instrumentation-client}.${CODE}`,
+    `src/{middleware,proxy,instrumentation,instrumentation-client}.${CODE}`,
+    `next.config.${CODE}`,
+];
+
+function globalEntries(appDir: string): string[] {
+    return GLOBAL_ENTRIES.flatMap((pattern) =>
+        [...new Bun.Glob(pattern).scanSync({ cwd: appDir, onlyFiles: true })].map((file) => path.join(appDir, file))
+    );
+}
+
 function matchesAny(file: string, patterns: string[]): boolean {
     return patterns.some((pattern) => new Bun.Glob(pattern).match(file));
 }
@@ -89,6 +104,8 @@ interface SideState {
     graph: ImportGraph;
     routes: RouteDef[];
     closures: Closure[];
+    /** Files reachable from middleware, instrumentation and next.config */
+    globalClosure: Closure;
 }
 
 interface Impact {
@@ -113,7 +130,13 @@ export function analyze(sides: AnalysisSide[], changed: string[] | null, options
         const extensions = detectPageExtensions(side.appDir) ?? options.pageExtensions;
         const routes = enumerateRoutes(side.appDir, extensions);
         const graph = new ImportGraph(side.root);
-        return { side, graph, routes, closures: routes.map((route) => graph.closure(route.entries)) };
+        return {
+            side,
+            graph,
+            routes,
+            closures: routes.map((route) => graph.closure(route.entries)),
+            globalClosure: graph.closure(globalEntries(side.appDir)),
+        };
     });
 
     const impacts = new Map<string, Impact>();
@@ -142,8 +165,22 @@ export function analyze(sides: AnalysisSide[], changed: string[] | null, options
                 ignoredFiles.push(file);
                 continue;
             }
-            let hit = false;
+            // Global files, and anything middleware / instrumentation / next.config import, affect every page
+            let globalVia: string[] | undefined;
+            for (const { side, graph, globalClosure } of states) {
+                const key = graph.key(path.join(side.root, file));
+                if (globalClosure.parents.has(key)) {
+                    globalVia = graph.chain(globalClosure, key).map((p) => relPosix(side.root, p));
+                    break;
+                }
+            }
+            if (globalVia || isGlobalFile(file, states[0].side, options.globalFiles)) {
+                globalFiles.push(file);
+                for (const impact of impacts.values()) addReason(impact, { kind: "global", file, via: globalVia });
+                continue;
+            }
 
+            let hit = false;
             for (const { side, graph, routes, closures } of states) {
                 const key = graph.key(path.join(side.root, file));
                 routes.forEach((route, i) => {
@@ -154,12 +191,6 @@ export function analyze(sides: AnalysisSide[], changed: string[] | null, options
                 });
             }
             if (hit) continue;
-
-            if (isGlobalFile(file, states[0].side, options.globalFiles)) {
-                globalFiles.push(file);
-                for (const impact of impacts.values()) addReason(impact, { kind: "global", file });
-                continue;
-            }
 
             // Assets (images, fonts, public/ files) aren't imported, so look for source files mentioning them
             if (!isSourceFile(file)) {

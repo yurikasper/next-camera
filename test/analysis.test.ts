@@ -143,4 +143,20 @@ describe("dynamic routes and deleted files", () => {
     test("directory comparison finds added, removed and modified files", () => {
         expect(compareDirectories(base, head)).toEqual(["components/Card.tsx", "pages/blog/[slug].tsx", "pages/index.tsx"]);
     });
+
+    test("directory comparison ignores line-ending-only differences", () => {
+        const lf = fs.mkdtempSync(path.join(os.tmpdir(), "next-camera-lf-"));
+        const crlf = fs.mkdtempSync(path.join(os.tmpdir(), "next-camera-crlf-"));
+        try {
+            const text = "export default () => (\n    <div />\n);\n";
+            for (const [dir, content] of [[lf, text], [crlf, text.replace(/\n/g, "\r\n")]]) {
+                fs.mkdirSync(path.join(dir, "pages"));
+                fs.writeFileSync(path.join(dir, "pages", "index.tsx"), content);
+            }
+            expect(compareDirectories(lf, crlf)).toEqual([]);
+        } finally {
+            fs.rmSync(lf, { recursive: true, force: true });
+            fs.rmSync(crlf, { recursive: true, force: true });
+        }
+    });
 });

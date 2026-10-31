@@ -17,7 +17,7 @@ import {
     type VariantReport,
 } from "./report";
 import { startServer, type Server } from "./server";
-import { prepareSides, resolveSources, type Side } from "./sources";
+import { analysisRoot, prepareSides, resolveSources, type Side, type Sources } from "./sources";
 import { formatDuration, plural, routeSlug, UserError } from "./util";
 
 const OUTPUT_MARKER = ".next-camera-output";
@@ -51,12 +51,18 @@ function sideReport(side: Side, server?: Server): SideReport {
     };
 }
 
-// Base and head run on different ports, so normalize origins before comparing error messages
-function normalizeIssue(issue: PageIssue): string {
-    return `${issue.kind}:${issue.message.replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+/g, "<origin>")}`;
+// Error messages are compared without what naturally differs between base and head: the origin
+// (different ports), stack frames (positions move whenever code moves) and build hashes.
+export function normalizeIssue(issue: PageIssue): string {
+    const firstLine = issue.message.split("\n")[0];
+    const normalized = firstLine
+        .replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+/g, "<origin>")
+        .replace(/:\d+:\d+/g, ":<pos>")
+        .replace(/\b[0-9a-f]{8,}\b/gi, "<hash>");
+    return `${issue.kind}:${normalized}`;
 }
 
-function issueDelta(from: PageIssue[], to: PageIssue[]): PageIssue[] {
+export function issueDelta(from: PageIssue[], to: PageIssue[]): PageIssue[] {
     const known = new Set(from.map(normalizeIssue));
     const seen = new Set<string>();
     return to.filter((issue) => {
@@ -111,13 +117,16 @@ async function captureTarget(
         css: options.css,
         waitMs: options.waitMs,
     };
-    const tabs = await Promise.all([
+    const opened = await Promise.allSettled([
         browser.newTab(variant.viewport, variant.colorScheme),
         browser.newTab(variant.viewport, variant.colorScheme),
     ]);
+    const tabs = opened.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
     let base: Capture;
     let head: Capture;
     try {
+        const failure = opened.find((result) => result.status === "rejected");
+        if (failure) throw (failure as PromiseRejectedResult).reason;
         [base, head] = await Promise.all([
             tabs[0].capture(servers.base.url + target.url, captureOptions),
             tabs[1].capture(servers.head.url + target.url, captureOptions),
@@ -179,10 +188,57 @@ async function captureTarget(
     return report;
 }
 
+// A capture that throws (browser crash, CDP timeout, corrupt PNG) fails that variant, not the run
+function failedVariant(variant: Variant, error: unknown): VariantReport {
+    const message = (error as Error)?.message ?? String(error);
+    const empty: CaptureReport = { image: null, width: 0, height: 0, status: null, stable: false, truncated: false, issues: [], error: message };
+    return {
+        variant: variant.name,
+        viewport: { width: variant.viewport.width, height: variant.viewport.height },
+        colorScheme: variant.colorScheme,
+        status: "failed",
+        diffPixels: 0,
+        diffPercent: 0,
+        diffImage: null,
+        regions: [],
+        base: empty,
+        head: { ...empty, issues: [] },
+        newIssues: [],
+        resolvedIssues: [],
+    };
+}
+
+// Headline status: "changed" wins so the route shows up with its images. Failed variants of a changed
+// route are still listed separately in the report and counted in summary.failed.
 function routeStatus(variants: VariantReport[]): RouteReport["status"] {
     if (variants.some((variant) => variant.status === "changed")) return "changed";
     if (variants.some((variant) => variant.status === "failed")) return "failed";
     return "unchanged";
+}
+
+function emptyAnalysis(): Analysis {
+    return { targets: [], skipped: [], globalFiles: [], unmappedFiles: [], ignoredFiles: [], routeCount: 0 };
+}
+
+// --dry-run output. The JSON shape is the same whether or not anything changed.
+function printPlan(analysis: Analysis, sources: Sources, options: Options) {
+    const changedFiles = sources.changedFiles ?? [];
+    if (options.json) {
+        const { targets, skipped, globalFiles, unmappedFiles, ignoredFiles } = analysis;
+        const plan = {
+            base: sideReport(sources.base),
+            head: sideReport(sources.head),
+            changedFiles,
+            targets,
+            skipped,
+            globalFiles,
+            unmappedFiles,
+            ignoredFiles,
+        };
+        process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
+    } else {
+        printDryRun(analysis, changedFiles, options);
+    }
 }
 
 function printDryRun(analysis: Analysis, changedFiles: string[], options: Options) {
@@ -225,7 +281,7 @@ export async function compare(options: Options): Promise<number> {
         base: sideReport(base),
         head: sideReport(head),
         browser: null,
-        changedFiles: sources.changedFiles,
+        changedFiles: sources.changedFiles ?? [],
         selection,
         routeCount: 0,
         globalFiles: [],
@@ -244,14 +300,21 @@ export async function compare(options: Options): Promise<number> {
         return code;
     };
 
-    if (!options.dryRun) prepareOutDir(options.out);
-    if (selection === "affected" && sources.changedFiles.length === 0) {
+    const noChanges = () => {
         log.info("No changed files.");
-        return finish(0);
-    }
-    if (selection === "affected") log.info(plural(sources.changedFiles.length, "changed file"));
+        if (!options.dryRun) return finish(0);
+        printPlan(emptyAnalysis(), sources, options);
+        return 0;
+    };
+
+    if (!options.dryRun) prepareOutDir(options.out);
+    if (selection === "affected" && sources.changedFiles?.length === 0) return noChanges();
 
     await prepareSides(sources, options, !options.dryRun);
+    const changedFiles = sources.changedFiles!;
+    report.changedFiles = changedFiles;
+    if (selection === "affected" && changedFiles.length === 0) return noChanges();
+    if (selection === "affected") log.info(plural(changedFiles.length, "changed file"));
 
     log.step(selection === "requested" ? "Collecting requested routes" : "Finding affected routes");
     const analysis: Analysis =
@@ -271,13 +334,17 @@ export async function compare(options: Options): Promise<number> {
                   ignoredFiles: [],
                   routeCount: options.routes.length,
               }
-            : analyze([base, head], selection === "all" ? null : sources.changedFiles, {
+            : analyze(
+                  [base, head].map((side) => ({ name: side.name, root: analysisRoot(sources, side), appDir: side.appDir })),
+                  selection === "all" ? null : changedFiles,
+                  {
                   pageExtensions: options.pageExtensions,
                   globalFiles: options.globalFiles,
                   ignoreFiles: options.ignoreFiles,
                   ignoreRoutes: options.ignoreRoutes,
                   routeSamples: options.routeSamples,
-              });
+                  }
+              );
     Object.assign(report, {
         routeCount: analysis.routeCount,
         globalFiles: analysis.globalFiles,
@@ -287,22 +354,7 @@ export async function compare(options: Options): Promise<number> {
     });
 
     if (options.dryRun) {
-        if (options.json) {
-            const { targets, skipped, globalFiles, unmappedFiles, ignoredFiles } = analysis;
-            const plan = {
-                base: sideReport(base),
-                head: sideReport(head),
-                changedFiles: sources.changedFiles,
-                targets,
-                skipped,
-                globalFiles,
-                unmappedFiles,
-                ignoredFiles,
-            };
-            process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
-        } else {
-            printDryRun(analysis, sources.changedFiles, options);
-        }
+        printPlan(analysis, sources, options);
         return 0;
     }
     if (analysis.targets.length === 0) {
@@ -329,7 +381,13 @@ export async function compare(options: Options): Promise<number> {
         for (const variant of variants) {
             const t0 = Date.now();
             log.step(`Capturing ${target.url} ${c.dim(`(${variant.name})`)}`);
-            const result = await captureTarget(browser, { base: baseServer, head: headServer }, target, variant, options);
+            let result: VariantReport;
+            try {
+                result = await captureTarget(browser, { base: baseServer, head: headServer }, target, variant, options);
+            } catch (error) {
+                log.warn(`Capturing ${target.url} (${variant.name}) failed: ${(error as Error)?.message ?? error}`);
+                result = failedVariant(variant, error);
+            }
             log.debug(`${target.url} ${variant.name}: ${result.status} in ${formatDuration(Date.now() - t0)}`);
             variantReports.push(result);
         }

@@ -253,5 +253,7 @@ bun run build      # dist/next-camera executable
 ## Publishing
 
 Publishing a GitHub release runs `.github/workflows/publish.yml`. It checks that the release tag
-matches `package.json` (`v0.1.0` ↔ `0.1.0`), runs the type check and tests, publishes to npm with
-trusted publishing, and attaches standalone executables for every platform to the release.
+matches `package.json` (`v0.1.0` ↔ `0.1.0`), runs the type check and tests, builds standalone
+executables for every platform and attaches them to the release, then publishes to npm with
+trusted publishing. Prerelease versions (`0.2.0-beta.1`) are published under their own dist-tag
+(`beta`), not `latest`.

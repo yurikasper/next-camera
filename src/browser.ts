@@ -237,25 +237,35 @@ export class Browser {
         ];
         log.debug(`Launching ${executable}`);
         const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+        // Until the browser object exists, make sure a failed or interrupted startup doesn't leave Chrome behind
+        const removeStartupCleanup = onCleanup(() => disposeProcess(child, userDataDir));
 
-        const wsUrl = await withTimeout(
-            new Promise<string>((resolve, reject) => {
-                let stderr = "";
-                child.stderr!.setEncoding("utf8");
-                child.stderr!.on("data", (chunk: string) => {
-                    stderr += chunk;
-                    const match = stderr.match(/DevTools listening on (ws:\/\/\S+)/);
-                    if (match) resolve(match[1]);
-                });
-                child.on("error", (error) => reject(new UserError(`Could not start ${executable}: ${error.message}`)));
-                child.on("exit", (code) =>
-                    reject(new UserError(`Browser exited during startup (code ${code}):\n${stderr.trim().slice(-2000)}`))
-                );
-            }),
-            30_000,
-            `Timed out waiting for ${executable} to start`
-        );
-        const connection = await Connection.connect(wsUrl);
+        let connection: Connection;
+        try {
+            const wsUrl = await withTimeout(
+                new Promise<string>((resolve, reject) => {
+                    let stderr = "";
+                    child.stderr!.setEncoding("utf8");
+                    child.stderr!.on("data", (chunk: string) => {
+                        stderr += chunk;
+                        const match = stderr.match(/DevTools listening on (ws:\/\/\S+)/);
+                        if (match) resolve(match[1]);
+                    });
+                    child.on("error", (error) => reject(new UserError(`Could not start ${executable}: ${error.message}`)));
+                    child.on("exit", (code) =>
+                        reject(new UserError(`Browser exited during startup (code ${code}):\n${stderr.trim().slice(-2000)}`))
+                    );
+                }),
+                30_000,
+                `Timed out waiting for ${executable} to start`
+            );
+            connection = await Connection.connect(wsUrl);
+        } catch (error) {
+            removeStartupCleanup();
+            await disposeProcess(child, userDataDir);
+            throw error;
+        }
+        removeStartupCleanup();
         const browser = new Browser(connection, child, userDataDir, executable);
         onCleanup(() => browser.close());
         return browser;
@@ -279,18 +289,22 @@ export class Browser {
                 // fall through to kill
             }
             this.connection.close();
-            if (this.process.exitCode === null) this.process.kill();
-            // Chrome keeps files locked for a moment after exiting on Windows
-            for (let attempt = 0; attempt < 5; attempt++) {
-                try {
-                    fs.rmSync(this.userDataDir, { recursive: true, force: true });
-                    break;
-                } catch {
-                    await sleep(300);
-                }
-            }
+            await disposeProcess(this.process, this.userDataDir);
         })();
         return this.closing;
+    }
+}
+
+async function disposeProcess(child: ChildProcess, userDataDir: string) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    // Chrome keeps files locked for a moment after exiting on Windows
+    for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+            fs.rmSync(userDataDir, { recursive: true, force: true });
+            return;
+        } catch {
+            await sleep(300);
+        }
     }
 }
 

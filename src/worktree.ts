@@ -73,17 +73,68 @@ function isAlive(pid: number): boolean {
     }
 }
 
-// Take an exclusive lock on a worktree slot so two concurrent runs never share one
-function tryLock(lockPath: string): boolean {
+function readLock(lockPath: string): number | null {
     try {
-        fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
-        return true;
+        return Number(fs.readFileSync(lockPath, "utf8").trim()) || null;
     } catch {
-        const pid = Number(fs.readFileSync(lockPath, "utf8").trim());
-        if (pid && pid !== process.pid && isAlive(pid)) return false;
-        fs.writeFileSync(lockPath, String(process.pid));
-        return true;
+        return null;
     }
+}
+
+// Create the lock file atomically with our pid already in it, so other processes never see it empty
+function createLock(lockPath: string): boolean {
+    const temp = `${lockPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, String(process.pid));
+    try {
+        fs.linkSync(temp, lockPath);
+        return true;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EEXIST") return false;
+        // Filesystems without hard links: fall back to exclusive create
+        try {
+            fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+            return true;
+        } catch {
+            return false;
+        }
+    } finally {
+        fs.rmSync(temp, { force: true });
+    }
+}
+
+// Take an exclusive lock on a worktree slot so two concurrent runs never share one
+export function tryLock(lockPath: string): boolean {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        if (createLock(lockPath)) return true;
+        const owner = readLock(lockPath);
+        if (owner === null) continue; // released in the meantime, try again
+        if (owner === process.pid || isAlive(owner)) return false;
+        // Stale lock from a dead process: move it aside, then check we moved the stale lock and not
+        // one another process created after we read it
+        const aside = `${lockPath}.${process.pid}.stale`;
+        try {
+            fs.renameSync(lockPath, aside);
+        } catch {
+            continue;
+        }
+        const moved = readLock(aside);
+        if (moved !== owner) {
+            try {
+                fs.linkSync(aside, lockPath);
+            } catch {
+                // someone else locked it meanwhile; theirs stays
+            }
+            fs.rmSync(aside, { force: true });
+            return false;
+        }
+        fs.rmSync(aside, { force: true });
+    }
+    return false;
+}
+
+export function releaseLock(lockPath: string) {
+    if (readLock(lockPath) === process.pid) fs.rmSync(lockPath, { force: true });
 }
 
 export interface Worktree {
@@ -94,6 +145,7 @@ export interface Worktree {
 export async function checkoutWorktree(repo: string, slot: string, sha: string): Promise<Worktree> {
     const root = repoCacheDir(repo);
     fs.mkdirSync(root, { recursive: true });
+    registerRoot(root);
 
     let dir = "";
     let lockPath = "";
@@ -107,7 +159,7 @@ export async function checkoutWorktree(repo: string, slot: string, sha: string):
         }
     }
     if (!dir) throw new Error(`All worktree slots for "${slot}" are locked by other next-camera processes`);
-    const release = () => fs.rmSync(lockPath, { force: true });
+    const release = () => releaseLock(lockPath);
 
     try {
         const repoGitDir = await commonGitDir(repo);
@@ -173,14 +225,12 @@ export async function removeWorktrees(repo: string | null): Promise<string[]> {
         if (!fs.existsSync(root)) continue;
         for (const entry of fs.readdirSync(root)) {
             const dir = path.join(root, entry);
-            if (entry.endsWith(".lock") || !fs.statSync(dir).isDirectory()) continue;
+            if (!fs.statSync(dir).isDirectory()) continue;
             const lock = path.join(root, `${entry}.lock`);
-            if (fs.existsSync(lock)) {
-                const pid = Number(fs.readFileSync(lock, "utf8").trim());
-                if (pid && isAlive(pid)) {
-                    log.warn(`Skipping ${dir}: in use by process ${pid}`);
-                    continue;
-                }
+            const pid = readLock(lock);
+            if (pid && isAlive(pid)) {
+                log.warn(`Skipping ${dir}: in use by process ${pid}`);
+                continue;
             }
             const owner = fs.existsSync(path.join(dir, ".git")) ? await commonGitDir(dir) : null;
             fs.rmSync(dir, { recursive: true, force: true });
@@ -192,11 +242,39 @@ export async function removeWorktrees(repo: string | null): Promise<string[]> {
         const parent = path.dirname(root);
         if (path.basename(parent) === ".next-camera-wt" && fs.readdirSync(parent).length === 0) fs.rmSync(parent, { recursive: true });
     }
+    pruneRegistry();
     return removed;
+}
+
+// Worktree roots can live beside repositories (see repoCacheDir), so every root we create is recorded
+// in the cache folder for `clean --all` to find
+const registryFile = () => path.join(cacheDir(), "roots.txt");
+
+function readRegistry(): string[] {
+    try {
+        return fs.readFileSync(registryFile(), "utf8").split(/\r?\n/).filter(Boolean);
+    } catch {
+        return [];
+    }
+}
+
+export function registerRoot(root: string) {
+    const roots = readRegistry();
+    if (roots.some((known) => pathKey(known) === pathKey(root))) return;
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.appendFileSync(registryFile(), root + "\n");
+}
+
+function pruneRegistry() {
+    const remaining = readRegistry().filter((root) => fs.existsSync(root));
+    if (remaining.length) fs.writeFileSync(registryFile(), remaining.join("\n") + "\n");
+    else fs.rmSync(registryFile(), { force: true });
 }
 
 function listCacheRoots(): string[] {
     const wt = path.join(cacheDir(), "wt");
-    if (!fs.existsSync(wt)) return [];
-    return fs.readdirSync(wt).map((name) => path.join(wt, name));
+    const inCache = fs.existsSync(wt) ? fs.readdirSync(wt).map((name) => path.join(wt, name)) : [];
+    const roots = new Map<string, string>();
+    for (const root of [...inCache, ...readRegistry()]) roots.set(pathKey(root), root);
+    return [...roots.values()];
 }

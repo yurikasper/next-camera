@@ -10,6 +10,7 @@
         "skipLibCheck": true,
         "noUnusedLocals": true,
         "allowImportingTsExtensions": true,
+        "resolveJsonModule": true,
         "verbatimModuleSyntax": false
     },
     "include": ["src", "test", "scripts"],

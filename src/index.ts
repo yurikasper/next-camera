@@ -9,18 +9,22 @@ import { configureLog, log } from "./log";
 import { exists, installSignalHandlers, isDirectory, runCleanups, UserError } from "./util";
 import { cacheDir, removeWorktrees } from "./worktree";
 
-// Config lives next to the app: look in the current directory (and up to the nearest package.json),
-// the --app directory and, for two-directory comparisons, the head directory.
-function configSearchDirs(args: ParsedArgs, cwd: string): string[] {
+// Config lives next to the app: look in the current directory (and up to the nearest package.json)
+// and in the --app directory. Like everywhere else, --app is relative to the repository root, or to
+// the head directory when comparing two directories.
+async function configSearchDirs(args: ParsedArgs, cwd: string): Promise<string[]> {
     const dirs = [];
     for (let dir = cwd; ; dir = path.dirname(dir)) {
         dirs.push(dir);
         if (exists(path.join(dir, "package.json")) || exists(path.join(dir, ".git")) || path.dirname(dir) === dir) break;
     }
     const app = args.flags.app as string | undefined;
-    if (app) dirs.push(path.resolve(cwd, app));
-    const head = args.positionals[1];
-    if (head && isDirectory(path.resolve(cwd, head))) dirs.push(path.resolve(cwd, head, app ?? "."));
+    const [base, head] = args.positionals.map((arg) => path.resolve(cwd, arg));
+    if (base && head && isDirectory(base) && isDirectory(head)) {
+        dirs.push(path.resolve(head, app ?? "."));
+    } else if (app) {
+        dirs.push(path.resolve((await findRepoRoot(cwd)) ?? cwd, app));
+    }
     return dirs;
 }
 
@@ -54,7 +58,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     const explicit = args.flags.config as string | undefined;
-    const configPath = explicit ? path.resolve(cwd, explicit) : findConfigFile(configSearchDirs(args, cwd));
+    const configPath = explicit ? path.resolve(cwd, explicit) : findConfigFile(await configSearchDirs(args, cwd));
     if (explicit && !exists(configPath!)) throw new UserError(`Config file not found: ${configPath}`);
     const config: FileConfig = configPath ? await loadConfigFile(configPath) : {};
     if (configPath) log.debug(`Using config ${configPath}`);
