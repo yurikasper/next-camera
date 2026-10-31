@@ -1,0 +1,50 @@
+{
+    "name": "next-camera",
+    "version": "0.1.0",
+    "description": "Screenshot the pages of a Next.js app before and after a change and diff them, so humans and coding agents can spot visual regressions",
+    "author": "Yuri Kasper",
+    "keywords": [
+        "nextjs",
+        "visual regression",
+        "screenshot",
+        "diff",
+        "cli",
+        "agents"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/yurikasper/next-camera"
+    },
+    "type": "module",
+    "publishConfig": {
+        "access": "public"
+    },
+    "bin": {
+        "next-camera": "./src/index.ts"
+    },
+    "files": [
+        "src",
+        "README.md"
+    ],
+    "engines": {
+        "bun": ">=1.2"
+    },
+    "scripts": {
+        "start": "bun ./src/index.ts",
+        "test": "bun test",
+        "typecheck": "tsc --noEmit",
+        "build": "bun build ./src/index.ts --compile --minify --outfile dist/next-camera",
+        "build:all": "bun run scripts/build-all.ts",
+        "prepublishOnly": "bun run typecheck && bun test"
+    },
+    "dependencies": {
+        "pixelmatch": "^8.0.0",
+        "pngjs": "^7.0.0"
+    },
+    "devDependencies": {
+        "@types/bun": "^1.4.4",
+        "@types/pngjs": "^6.0.5",
+        "typescript": "^7.0.2"
+    }
+}
